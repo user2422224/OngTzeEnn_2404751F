@@ -7,7 +7,6 @@ from datetime import datetime
 import plotly.graph_objects as go
 
 
-# This defines the app title, icon, and layout for deployment
 st.set_page_config(
     page_title="Airbnb Price Prediction",
     page_icon="🏡",
@@ -15,19 +14,14 @@ st.set_page_config(
 )
 
 
-# Path to the dataset used for computing global price statistics
-# This dataset is not used for prediction, only for contextual visualisation
 DATA_PATH = "airbnb.csv"
 
-# Registry of model versions available for deployment
-# Additional models can be added here without changing application logic
+
 MODEL_FILES = {
     "Final Iterative (Log-Transformed)": "airbnb_pricing_model.pkl",
 }
 
 
-# Custom CSS is applied to improve visual clarity and user experience
-# This ensures a professional, presentation-ready interface
 st.markdown(
     """
     <style>
@@ -53,29 +47,58 @@ st.markdown(
         padding: 1.15rem 1.25rem;
         border: 1px solid rgba(0,0,0,0.06);
       }
+
+      .title-big {
+        font-size: 2.0rem;
+        font-weight: 800;
+        margin-bottom: 0.1rem;
+      }
+
+      .subtitle {
+        color: rgba(0,0,0,0.65);
+        margin-bottom: 0.9rem;
+      }
+
+      .section-title {
+        font-size: 1.05rem;
+        font-weight: 650;
+        margin-bottom: 0.3rem;
+      }
+
+      .section-subtitle {
+        font-size: 0.9rem;
+        color: rgba(0,0,0,0.62);
+        margin-bottom: 0.9rem;
+      }
+
+      .stButton > button {
+        border-radius: 10px;
+        padding: 0.6rem 1.2rem;
+        font-weight: 650;
+      }
+
+      div[data-baseweb="select"] > div {
+        border-radius: 10px !important;
+      }
     </style>
     """,
     unsafe_allow_html=True
 )
 
 
-# Main application title and subtitle for clarity
-st.markdown("<h1>Airbnb AI Price Prediction</h1>", unsafe_allow_html=True)
+st.markdown("<div class='title-big'>Airbnb AI Price Prediction</div>", unsafe_allow_html=True)
 st.markdown(
-    "<p>Interactive nightly price estimation using trained machine learning models.</p>",
+    "<div class='subtitle'>Interactive nightly price estimation using trained machine learning models.</div>",
     unsafe_allow_html=True
 )
 
 
-# Allowed country values are restricted to the countries present in the training data
 countries = [
     "United Kingdom", "France", "Italy", "Greece", "Turkey",
     "Morocco", "Japan", "India", "Thailand", "Georgia"
 ]
 
 
-# Attempts to automatically identify the price column in the dataset
-# This allows flexibility if column names differ slightly
 def find_price_column(df: pd.DataFrame) -> str:
     candidates = ["price", "Price", "nightly_price", "nightlyPrice", "price_usd", "Price_USD", "listing_price"]
     for c in candidates:
@@ -87,21 +110,16 @@ def find_price_column(df: pd.DataFrame) -> str:
     return ""
 
 
-# Loads dataset-level price statistics used for visual context
-# Cached to prevent repeated disk reads during interaction
 @st.cache_data
 def load_dataset_prices(path: str) -> dict:
     df = pd.read_csv(path)
     price_col = find_price_column(df)
     if not price_col:
         raise ValueError("Could not detect a price column in dataset.")
-
     prices = pd.to_numeric(df[price_col], errors="coerce").dropna()
     prices = prices[prices >= 0]
-
     if len(prices) == 0:
         raise ValueError("No valid prices found in dataset.")
-
     return {
         "price_col": price_col,
         "min": float(prices.min()),
@@ -113,14 +131,11 @@ def load_dataset_prices(path: str) -> dict:
     }
 
 
-# Loads a serialized model or deployment package only once per session
-# This improves responsiveness and avoids repeated file loading
 @st.cache_resource
 def load_any_model(file_path: str):
     return joblib.load(file_path)
 
 
-# Filters the model registry to include only files that exist locally
 def resolve_available_models() -> dict:
     available = {}
     for name, path in MODEL_FILES.items():
@@ -129,9 +144,12 @@ def resolve_available_models() -> dict:
     return available
 
 
-# Unpacks either a deployment package dictionary or a plain sklearn model
-# This supports flexible export formats from the training notebook
 def unpack_deployment_package(obj):
+    """
+    Supports:
+    1) deployment_package dict with keys: model, features(optional), target_transform(optional)
+    2) plain sklearn model/pipeline object
+    """
     if isinstance(obj, dict) and "model" in obj:
         model_obj = obj["model"]
         engineered_features = obj.get("features", [])
@@ -141,10 +159,8 @@ def unpack_deployment_package(obj):
     return obj, [], ""
 
 
-# Aligns user input to the exact feature schema expected by the trained model
-# Missing features are filled safely to prevent runtime prediction errors
 def build_pipeline_input(base_df: pd.DataFrame, model_obj, engineered_features) -> pd.DataFrame:
-    if isinstance(engineered_features, (list, tuple)) and engineered_features:
+    if isinstance(engineered_features, (list, tuple)) and len(engineered_features) > 0:
         expected_cols = list(engineered_features)
     elif hasattr(model_obj, "feature_names_in_"):
         expected_cols = list(model_obj.feature_names_in_)
@@ -168,14 +184,12 @@ def build_pipeline_input(base_df: pd.DataFrame, model_obj, engineered_features) 
     return df
 
 
-# Converts predictions back to original scale if log transformation was used
 def inverse_target_if_needed(pred_value: float, target_transform: str) -> float:
     if target_transform == "log1p":
         return float(np.expm1(pred_value))
     return float(pred_value)
 
 
-# Applies rounding and clamping to ensure deployment-safe outputs
 def clamp_round_safe(value: float, min_v: float, max_v: float, nearest: int) -> float:
     v = float(value)
     if not np.isfinite(v):
@@ -191,19 +205,60 @@ def clamp_round_safe(value: float, min_v: float, max_v: float, nearest: int) -> 
     return float(v)
 
 
-# Stores prediction history across user interactions
+def apply_input_validation(
+    guests: int,
+    bedrooms: int,
+    bathrooms: int,
+    beds: int,
+    studios: int
+) -> dict:
+    """
+    Prevents unrealistic or out-of-distribution combinations that the dataset/model likely never saw.
+    Returns the adjusted values plus user-facing notes about what was auto-corrected.
+    """
+
+    notes = []
+
+    if guests < 1:
+        guests = 1
+        notes.append("Guests cannot be below 1, so it was set to 1.")
+
+    if beds < 1:
+        beds = 1
+        notes.append("Beds cannot be 0 in real listings, so it was set to 1.")
+
+    if bathrooms < 1:
+        bathrooms = 1
+        notes.append("Bathrooms cannot be 0 in real listings, so it was set to 1.")
+
+    if bedrooms == 0 and studios == 0:
+        studios = 1
+        notes.append("Bedrooms is 0, so Studios was auto-set to 1 (studio listing).")
+
+    if bedrooms > 0 and studios == 1:
+        studios = 0
+        notes.append("Studios was set to 0 because Bedrooms is greater than 0.")
+
+    return {
+        "guests": int(guests),
+        "bedrooms": int(bedrooms),
+        "bathrooms": int(bathrooms),
+        "beds": int(beds),
+        "studios": int(studios),
+        "notes": notes
+    }
+
+
 if "history" not in st.session_state:
     st.session_state.history = []
 
 
-# Validates that at least one model is available before rendering the interface
 available_models = resolve_available_models()
 if not available_models:
-    st.error("No model files found. Place your .pkl file in the same directory as app.py.")
+    st.error("No model files found. Put your .pkl model file(s) in the same folder as app.py.")
     st.stop()
 
 
-# Sidebar contains non-critical controls to avoid cluttering the main flow
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/6/69/Airbnb_Logo_B%C3%A9lo.svg", width=120)
     st.header("App Controls")
@@ -214,87 +269,235 @@ with st.sidebar:
         index=0
     )
 
+    st.divider()
     show_debug = st.checkbox("Show model input (debug)", value=False)
     show_raw = st.checkbox("Show raw prediction (debug)", value=True)
 
+    st.caption("Validation is enabled to prevent unrealistic input combinations.")
 
-# Main navigation separates prediction, history, and export for clarity
-tab_pred, tab_history, tab_export = st.tabs(["Predict", "History", "Export"])
+
+tabs = st.tabs(["Predict", "History", "Export"])
+tab_pred, tab_history, tab_export = tabs
 
 
 with tab_pred:
     left, right = st.columns([1.15, 0.85], gap="large")
 
     with left:
-        st.subheader("Listing parameters")
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Listing parameters</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-subtitle'>Enter listing attributes, then predict.</div>", unsafe_allow_html=True)
 
-        country_selected = st.selectbox("Country", countries)
-        guests_selected = st.slider("Guests", 1, 16, 2)
-        bedrooms_selected = st.slider("Bedrooms", 0, 10, 1)
-        bathrooms_selected = st.slider("Bathrooms (integer)", 0, 10, 1)
-        beds_selected = st.slider("Beds", 0, 16, 1)
-        studios_selected = st.selectbox("Studios (0 = No, 1 = Yes)", [0, 1])
+        c1, c2 = st.columns(2)
+        with c1:
+            country_selected = st.selectbox("Country", countries, index=0)
+            guests_selected = st.slider("Guests", 1, 16, 2, 1)
+            bedrooms_selected = st.slider("Bedrooms", 0, 10, 1, 1)
 
-        toiles_selected = 1 if bathrooms_selected >= 1 else 0
+        with c2:
+            bathrooms_selected = st.slider("Bathrooms (integer)", 1, 10, 1, 1)
+            beds_selected = st.slider("Beds", 1, 16, 1, 1)
 
-        issues = []
-        if bedrooms_selected == 0 and studios_selected == 0:
-            issues.append("Bedrooms and Studios are both 0. Select Studios = 1 for studio listings.")
-        if beds_selected < max(1, guests_selected // 2):
-            issues.append("Beds appear low relative to number of guests.")
+            studios_disabled = (bedrooms_selected == 0)
+            default_studio = 1 if studios_disabled else 0
 
-        if issues:
-            st.warning("Sanity checks:")
-            for msg in issues:
-                st.write(f"- {msg}")
+            studios_selected = st.selectbox(
+                "Studios (0 = No, 1 = Yes)",
+                [0, 1],
+                index=1 if default_studio == 1 else 0,
+                disabled=studios_disabled
+            )
 
-        st.subheader("Output settings")
+            if studios_disabled:
+                st.caption("Studios is locked to 1 when Bedrooms is 0.")
+
+        st.divider()
+
+        st.markdown("<div class='section-title'>Output settings</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-subtitle'>Business safeguards for deployment outputs.</div>", unsafe_allow_html=True)
+
         round_to_nearest = st.selectbox("Round to nearest ($)", [1, 5, 10, 50, 100], index=2)
-        clamp_min = st.number_input("Minimum clamp ($)", min_value=0, value=0)
-        clamp_max = st.number_input("Maximum clamp ($)", min_value=100, value=10000)
+        clamp_min = st.number_input("Minimum clamp ($)", min_value=0, value=0, step=10)
+        clamp_max = st.number_input("Maximum clamp ($)", min_value=100, value=10000, step=100)
 
+        st.write("")
         predict_btn = st.button("Predict Price", type="primary")
 
+        st.markdown("</div>", unsafe_allow_html=True)
+
     with right:
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Prediction</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-subtitle'>Result is shown with dataset min–max context.</div>", unsafe_allow_html=True)
+
+        if not predict_btn:
+            st.info("Fill in the listing parameters and click Predict Price.")
+
         if predict_btn:
+            validated = apply_input_validation(
+                guests=int(guests_selected),
+                bedrooms=int(bedrooms_selected),
+                bathrooms=int(bathrooms_selected),
+                beds=int(beds_selected),
+                studios=int(studios_selected)
+            )
+
+            if validated["notes"]:
+                st.warning("Input validation applied:")
+                for note in validated["notes"]:
+                    st.write(f"- {note}")
+
+            toiles_selected = 1 if validated["bathrooms"] >= 1 else 0
+
             model_path = available_models[selected_model_name]
             raw_loaded = load_any_model(model_path)
             model_obj, engineered_features, target_transform = unpack_deployment_package(raw_loaded)
 
             df_input = pd.DataFrame({
                 "country": [country_selected],
-                "guests": [guests_selected],
-                "bedrooms": [bedrooms_selected],
-                "bathrooms": [bathrooms_selected],
-                "beds": [beds_selected],
-                "studios": [studios_selected],
-                "toiles": [toiles_selected]
+                "guests": [validated["guests"]],
+                "bedrooms": [validated["bedrooms"]],
+                "bathrooms": [validated["bathrooms"]],
+                "beds": [validated["beds"]],
+                "studios": [validated["studios"]],
+                "toiles": [int(toiles_selected)]
             })
 
             df_ready = build_pipeline_input(df_input, model_obj, engineered_features)
 
-            raw_pred = float(model_obj.predict(df_ready)[0])
-            pred_price = inverse_target_if_needed(raw_pred, target_transform)
-            y_pred = clamp_round_safe(pred_price, clamp_min, clamp_max, round_to_nearest)
+            try:
+                raw_pred = float(model_obj.predict(df_ready)[0])
+                pred_price = inverse_target_if_needed(raw_pred, target_transform)
 
-            st.success(f"Predicted nightly price: ${y_pred:,.0f}")
+                clipped = (np.isfinite(pred_price) and pred_price > float(clamp_max))
+                y_pred = clamp_round_safe(pred_price, clamp_min, clamp_max, round_to_nearest)
+
+                if show_raw:
+                    if target_transform == "log1p":
+                        st.caption(f"Debug: raw model output (log1p scale) = {raw_pred:,.6f}")
+                        st.caption(f"Debug: converted back to price (before clamp/round) = {pred_price:,.2f}")
+                    else:
+                        st.caption(f"Debug: raw model output (before clamp/round) = {raw_pred:,.2f}")
+
+                if not np.isfinite(y_pred):
+                    st.error("Prediction returned an invalid value (NaN/Infinity). Try different inputs.")
+                else:
+                    st.success("Prediction completed")
+
+                    try:
+                        stats = load_dataset_prices(DATA_PATH)
+                        min_p = stats["min"]
+                        max_p = stats["max"]
+                        med_p = stats["median"]
+                        p90 = stats["p90"]
+                        p99 = stats["p99"]
+
+                        pred_val = float(y_pred)
+                        if np.isfinite(pred_val):
+                            pred_val = max(min_p, min(pred_val, max_p))
+                        else:
+                            pred_val = med_p
+
+                        fig_range = go.Figure()
+                        fig_range.add_trace(go.Indicator(
+                            mode="gauge+number",
+                            value=pred_val,
+                            number={"prefix": "$", "valueformat": ",.0f", "font": {"size": 34}},
+                            title={"text": "Predicted Price within Dataset Range"},
+                            gauge={
+                                "axis": {"range": [min_p, max_p], "tickformat": ",.0f", "tickcolor": "#6b7280"},
+                                "bar": {"color": "#FF385C"},
+                                "steps": [
+                                    {"range": [min_p, p90], "color": "#fde2e7"},
+                                    {"range": [p90, p99], "color": "#fbb6c2"},
+                                    {"range": [p99, max_p], "color": "#ef4444"},
+                                ],
+                                "threshold": {
+                                    "line": {"color": "#7f1d1d", "width": 4},
+                                    "thickness": 0.85,
+                                    "value": pred_val
+                                }
+                            }
+                        ))
+                        fig_range.update_layout(
+                            height=260,
+                            margin=dict(t=40, b=10, l=10, r=10),
+                            paper_bgcolor="rgba(0,0,0,0)",
+                            font={"color": "#111827"}
+                        )
+                        st.plotly_chart(fig_range, use_container_width=True)
+
+                        st.caption(
+                            f"Dataset: min ${min_p:,.0f} | median ${med_p:,.0f} | 90th ${p90:,.0f} | "
+                            f"99th ${p99:,.0f} | max ${max_p:,.0f}"
+                        )
+                    except Exception as e:
+                        st.metric("Predicted price (per night)", f"${y_pred:,.2f}")
+                        st.caption(f"Dataset range graph unavailable (dataset issue): {e}")
+
+                    if clipped:
+                        st.warning(f"Note: Raw prediction exceeded the maximum clamp, so output was capped at ${int(clamp_max):,}.")
+
+                    st.session_state.history.append({
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "model_version": selected_model_name,
+                        "country": country_selected,
+                        "guests": validated["guests"],
+                        "bedrooms": validated["bedrooms"],
+                        "bathrooms": validated["bathrooms"],
+                        "beds": validated["beds"],
+                        "studios": validated["studios"],
+                        "toiles": int(toiles_selected),
+                        "target_transform": target_transform if target_transform else "none",
+                        "raw_model_output": float(raw_pred),
+                        "predicted_price": float(y_pred),
+                        "cap_max": float(clamp_max),
+                        "capped": "Yes" if clipped else "No",
+                    })
+
+                if show_debug:
+                    with st.expander("Debug: final input sent into Pipeline"):
+                        st.dataframe(df_ready, use_container_width=True)
+
+            except Exception as e:
+                st.error(
+                    "Prediction failed. This usually means your model expects different columns.\n"
+                    "Fix: ensure your saved model is a Pipeline or the deployment package with correct features."
+                )
+                st.code(str(e))
+
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 with tab_history:
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>Prediction History</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-subtitle'>Your past predictions for demo evidence.</div>", unsafe_allow_html=True)
+
     if st.session_state.history:
-        st.dataframe(pd.DataFrame(st.session_state.history))
+        hist_df = pd.DataFrame(st.session_state.history)
+        st.dataframe(hist_df, use_container_width=True)
     else:
-        st.write("No predictions recorded yet.")
+        st.write("No predictions yet. Generate a few predictions first.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 with tab_export:
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>Export</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-subtitle'>Download prediction history (CSV).</div>", unsafe_allow_html=True)
+
     if st.session_state.history:
-        csv = pd.DataFrame(st.session_state.history).to_csv(index=False).encode("utf-8")
+        hist_df = pd.DataFrame(st.session_state.history)
+        csv = hist_df.to_csv(index=False).encode("utf-8")
         st.download_button(
-            "Download prediction history",
+            "Download prediction history (CSV)",
             data=csv,
             file_name="airbnb_predictions.csv",
             mime="text/csv"
         )
     else:
-        st.write("No data available for export.")
+        st.write("Generate predictions first, then you can export them here.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
