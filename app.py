@@ -7,12 +7,15 @@ from datetime import datetime
 import plotly.graph_objects as go
 
 
+
 # Page configuration must be the first Streamlit command to avoid runtime errors.
 st.set_page_config(
     page_title="Airbnb Price Prediction",
     page_icon="🏡",
     layout="wide"
 )
+
+
 
 # Dataset path used to compute min, max, and percentile statistics for the price range gauge.
 DATA_PATH = "airbnb.csv"
