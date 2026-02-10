@@ -1,190 +1,207 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import joblib
-import plotly.graph_objects as go
-import plotly.express as px
 
-# --- 1.0 EXECUTIVE PAGE CONFIG ---
+
+import numpy as np
+import pandas as pd
+import joblib
+import streamlit as st
+
+
 st.set_page_config(
-    page_title="ProphetPrice AI | Global Airbnb Intelligence",
-    page_icon="📈",
+    page_title="Airbnb Price Predictor",
+    page_icon="🏷️",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# --- 2.0 NEUMORPHIC DESIGN & CSS ---
-st.markdown("""
-    <style>
-    /* Global Styles */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
-    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-    
-    /* Executive Card Styling */
-    .executive-card {
-        background: #ffffff;
-        padding: 2rem;
-        border-radius: 20px;
-        border: 1px solid #eef2f6;
-        box-shadow: 0 10px 15px -3px rgba(0,0,0,0.05);
-        margin-bottom: 1rem;
-    }
-    
-    /* Price Hero Section */
-    .price-hero {
-        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-        color: white;
-        padding: 3rem;
-        border-radius: 24px;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    
-    /* Sidebar Cleanup */
-    .css-1d391kg { background-color: #f8fafc; }
-    
-    /* Status Badge */
-    .badge {
-        padding: 4px 12px;
-        border-radius: 99px;
-        font-size: 12px;
-        font-weight: 600;
-        background: #dcfce7;
-        color: #166534;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+st.markdown(
+    """
+<style>
+.block-container { max-width: 1180px; padding-top: 2rem; padding-bottom: 2rem; }
+h1, h2, h3 { letter-spacing: -0.02em; }
+:root { --border: rgba(0,0,0,.08); --muted: rgba(0,0,0,.55); }
+.small-muted { color: var(--muted); font-size: 0.92rem; line-height: 1.35; }
+.card { border: 1px solid var(--border); border-radius: 16px; padding: 18px; background: #fff; }
+.metric { border: 1px solid var(--border); border-radius: 16px; padding: 18px; background: #fff; }
+.metric .label { color: var(--muted); font-size: 0.9rem; margin-bottom: 8px; }
+.metric .value { font-size: 2rem; font-weight: 700; letter-spacing: -0.02em; }
+.hr { height: 1px; background: rgba(0,0,0,.06); margin: 16px 0; }
+.badge {
+  display: inline-block; padding: 6px 10px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted); font-size: 0.85rem;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
-# --- 3.0 DATA & MODEL ORCHESTRATION ---
-@st.cache_resource
-def load_enterprise_assets():
-    try:
-        # Load the pipeline package saved in Section 7.0
-        package = joblib.load('airbnb_pricing_model.pkl')
-        return package
-    except Exception as e:
-        return None
 
-assets = load_enterprise_assets()
+@st.cache_resource(show_spinner=False)
+def load_package(model_path: Path) -> Tuple[Any, List[str], str]:
+    obj = joblib.load(model_path)
 
-# --- 4.0 SIDEBAR CONTROL CENTER ---
+    if not isinstance(obj, dict) or "model" not in obj:
+        raise ValueError("Invalid artifact format. Expected a dict with keys: 'model', 'features', 'target_transform'.")
+
+    model = obj["model"]
+    features = obj.get("features")
+    target_transform = str(obj.get("target_transform", "")).strip().lower()
+
+    if not features or not isinstance(features, (list, tuple)):
+        raise ValueError("Artifact missing 'features' list/tuple.")
+
+    return model, list(features), target_transform
+
+
+def money(x: float, currency: str = "USD") -> str:
+    x = float(x)
+    if not np.isfinite(x):
+        return "—"
+    return f"{currency} {max(0.0, x):,.2f}"
+
+
+def build_input_df(features: List[str], values: Dict[str, Any]) -> pd.DataFrame:
+    row = {}
+    for f in features:
+        row[f] = values.get(f)
+    return pd.DataFrame([row], columns=features)
+
+
+def guess_field_ui(feature_name: str) -> str:
+    f = feature_name.lower()
+    if f in {"country", "location", "city", "region"}:
+        return "text"
+    if any(k in f for k in ["guest", "bedroom", "bathroom", "bed", "studio", "toilet", "toile", "room"]):
+        return "int"
+    return "auto"
+
+
+MODEL_PATH = Path("airbnb_pricing_model.pkl")
+
+st.title("Airbnb Price Predictor")
+st.markdown(
+    "<div class='small-muted'>Estimate a nightly listing price using your trained Gradient Boosting pipeline.</div>",
+    unsafe_allow_html=True,
+)
+
+if not MODEL_PATH.exists():
+    st.error(
+        "Model artifact not found.\n\n"
+        "Expected file: `airbnb_pricing_model.pkl` in the same folder as this app.\n"
+        "Fix: upload/copy your pickle into the Streamlit app directory (or repo root)."
+    )
+    st.stop()
+
+try:
+    model, features, target_transform = load_package(MODEL_PATH)
+except Exception as e:
+    st.error(f"Failed to load model artifact: {e}")
+    st.stop()
+
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/6/69/Airbnb_Logo_B%C3%A9lo.svg", width=120)
-    st.markdown("### **Control Center**")
-    st.caption("Adjust parameters to simulate market shifts.")
-    
-    st.divider()
-    
-    # Location Intelligence
-    country = st.selectbox("🌍 Target Market", ["Georgia", "USA", "UK", "France", "Other"])
-    property_type = st.selectbox("🏠 Property Class", ["Apartment", "House", "Condo", "Loft", "Villa"])
-    room_type = st.radio("🔑 Inventory Type", ["Entire home/apt", "Private room", "Shared room"])
-    
-    st.divider()
-    
-    # Capacity Engineering
-    st.markdown("#### **Space Optimization**")
-    col_s1, col_s2 = st.columns(2)
-    with col_s1:
-        guests = st.number_input("Guests", 1, 16, 4)
-        bedrooms = st.number_input("Bedrooms", 1, 8, 2)
-    with col_s2:
-        beds = st.number_input("Beds", 1, 12, 2)
-        bathrooms = st.number_input("Baths", 1.0, 6.0, 1.5, 0.5)
+    st.markdown("### Inputs")
+    st.markdown("<div class='small-muted'>Fields are driven directly by the saved feature list.</div>", unsafe_allow_html=True)
 
-# --- 5.0 MAIN EXECUTIVE DASHBOARD ---
-if assets is None:
-    st.error("🚨 **System Error:** Model 'airbnb_pricing_model.pkl' not detected. Ensure the model is exported from the notebook.")
-else:
-    # Header Row
-    st.markdown('<div><span class="badge">v2.1 Production Ready</span></div>', unsafe_allow_html=True)
-    st.title("ProphetPrice AI: Executive Dashboard")
-    st.markdown("---")
+    user_values: Dict[str, Any] = {}
 
-    # Action Trigger
-    if st.button("✨ Run Market Simulation"):
-        # Prediction Logic
-        input_data = pd.DataFrame({
-            'country': [country],
-            'property_type': [property_type],
-            'room_type': [room_type],
-            'accommodates': [guests],
-            'bedrooms': [bedrooms],
-            'bathrooms': [bathrooms],
-            'beds': [beds]
-        })
-        
-        # Log Transformation Inversion
-        raw_log_price = assets['model'].predict(input_data)
-        prediction = np.expm1(raw_log_price)[0]
+    for feat in features:
+        ui_type = guess_field_ui(feat)
 
-        # 5.1 HERO PRICE SECTION
-        st.markdown(f"""
-            <div class="price-hero">
-                <p style="letter-spacing: 2px; text-transform: uppercase; font-size: 14px; opacity: 0.8;">Suggested Nightly Valuation</p>
-                <h1 style="font-size: 64px; margin: 10px 0;">${prediction:,.2f}</h1>
-                <p style="font-size: 18px;">Targeting <b>{country}</b> Market Tier: <b>{"Ultra-Luxury" if prediction > 15000 else "Premium" if prediction > 5000 else "Economy"}</b></p>
-            </div>
-        """, unsafe_allow_html=True)
-
-        # 5.2 ANALYTICS GRID
-        col_left, col_right = st.columns([1, 1])
-
-        with col_left:
-            st.markdown('<div class="executive-card">', unsafe_allow_html=True)
-            st.subheader("📊 Price Elasticity")
-            
-            # Gauge Chart
-            fig_gauge = go.Figure(go.Indicator(
-                mode = "gauge+number",
-                value = prediction,
-                gauge = {
-                    'axis': {'range': [None, 30000], 'tickwidth': 1},
-                    'bar': {'color': "#FF385C"},
-                    'bgcolor': "white",
-                    'steps': [
-                        {'range': [0, 10000], 'color': '#f1f5f9'},
-                        {'range': [10000, 20000], 'color': '#e2e8f0'}
-                    ],
-                }
-            ))
-            fig_gauge.update_layout(height=250, margin=dict(l=20, r=20, t=40, b=20))
-            st.plotly_chart(fig_gauge, use_container_width=True)
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        with col_right:
-            st.markdown('<div class="executive-card">', unsafe_allow_html=True)
-            st.subheader("📈 Revenue Optimization")
-            
-            # Simple Revenue Projection based on occupancy
-            occ_rates = [0.5, 0.7, 0.9]
-            revenues = [prediction * 30 * rate for rate in occ_rates]
-            
-            fig_rev = px.bar(
-                x=["50% Occupancy", "70% Occupancy", "90% Occupancy"],
-                y=revenues,
-                labels={'x': 'Scenario', 'y': 'Monthly Revenue ($)'},
-                color_discrete_sequence=['#1e293b']
+        if ui_type == "text":
+            default = "Singapore" if feat.lower() == "country" else ""
+            user_values[feat] = st.text_input(feat.replace("_", " ").title(), value=default)
+        elif ui_type == "int":
+            user_values[feat] = st.number_input(
+                feat.replace("_", " ").title(),
+                min_value=0,
+                max_value=50,
+                value=1 if feat.lower() in {"guests", "beds", "bedrooms", "bathrooms", "toiles", "toilets"} else 0,
+                step=1,
             )
-            fig_rev.update_layout(height=250, margin=dict(l=20, r=20, t=20, b=20))
-            st.plotly_chart(fig_rev, use_container_width=True)
-            st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            user_values[feat] = st.text_input(feat.replace("_", " ").title(), value="")
 
-        # 5.3 BUSINESS INTELLIGENCE (The "Grade A" difference)
-        st.markdown("### 💡 Startup Growth Insights")
-        c1, c2, c3 = st.columns(3)
-        
-        with c1:
-            st.info(f"**Market Positioning:** Your listing is priced in the top {np.percentile([prediction, 5000, 15000], 50):.0f}% of the {country} market.")
-        with c2:
-            st.success(f"**ROI Accelerator:** Adding a dedicated workspace could allow for a 12% price markup based on business travel trends.")
-        with c3:
-            st.warning(f"**Volatility Alert:** Large {property_type}s in {country} show higher price variance. Ensure high-quality photos to maintain this rate.")
+    st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
+    currency = st.selectbox("Display currency", options=["USD", "SGD", "EUR", "GBP"], index=0)
+    show_input_preview = st.checkbox("Show input preview", value=True)
+    show_debug = st.checkbox("Debug: show raw output", value=False)
+    predict_btn = st.button("Predict price", type="primary", use_container_width=True)
 
+input_df = build_input_df(features, user_values)
+
+left, right = st.columns([1.15, 0.85], gap="large")
+
+with left:
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.markdown("#### Input Summary")
+    st.markdown(
+        "<div class='small-muted'>A single-row DataFrame is passed into your saved pipeline (includes preprocessing).</div>",
+        unsafe_allow_html=True,
+    )
+
+    if show_input_preview:
+        st.dataframe(input_df, use_container_width=True, hide_index=True)
+
+    st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
+    st.markdown(
+        "<span class='badge'>Deployment note</span> "
+        "<span class='small-muted'>Your artifact declares <b>target_transform</b> = "
+        f"<b>{target_transform or 'none'}</b>. The app will inverse-transform if needed.</span>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with right:
+    st.markdown("<div class='metric'>", unsafe_allow_html=True)
+    st.markdown("<div class='label'>Predicted nightly price</div>", unsafe_allow_html=True)
+
+    if "pred_price" not in st.session_state:
+        st.markdown("<div class='value'>—</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='small-muted'>Enter inputs on the left and click <b>Predict price</b>.</div>",
+            unsafe_allow_html=True,
+        )
     else:
-        # Empty State
-        st.write("")
-        st.image("https://cdn.dribbble.com/users/1210339/screenshots/2763242/attachments/562546/airbnb-loop.gif", width=400)
-        st.markdown("### **Ready to Scale?**")
-        st.markdown("Configure your listing in the sidebar and click **'Run Market Simulation'** to generate AI-backed insights.")
+        st.markdown(
+            f"<div class='value'>{money(st.session_state['pred_price'], currency=currency)}</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<div class='small-muted'>This is an estimate based on patterns learned from your training data.</div>",
+            unsafe_allow_html=True,
+        )
 
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if show_debug and "raw_pred" in st.session_state:
+        st.caption(f"Raw model output: {st.session_state['raw_pred']}")
+
+
+if predict_btn:
+    try:
+        raw_pred = float(model.predict(input_df)[0])
+
+        if target_transform == "log1p":
+            pred_price = float(np.expm1(raw_pred))
+        else:
+            pred_price = raw_pred
+
+        if not np.isfinite(pred_price):
+            raise ValueError("Prediction is not a finite number.")
+
+        pred_price = max(0.0, pred_price)
+
+        st.session_state["raw_pred"] = raw_pred
+        st.session_state["pred_price"] = pred_price
+
+        st.toast("Prediction generated.", icon="✅")
+        st.rerun()
+
+    except Exception as e:
+        st.error(
+            "Prediction failed.\n\n"
+            "Common causes:\n"
+            "- Feature mismatch between app inputs and training\n"
+            "- Different scikit-learn version from when the model was saved\n"
+            "- Unexpected values in categorical fields (e.g., country naming)\n\n"
+            f"Error: {e}"
+        )
