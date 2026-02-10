@@ -85,7 +85,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.markdown("<div class='title-big'>Airbnb Nightly Price Predictor</div>", unsafe_allow_html=True)
+st.markdown("<div class='title-big'>Airbnb AI Price Predictior</div>", unsafe_allow_html=True)
 st.markdown(
     "<div class='subtitle'>Predict an estimated nightly price using listing attributes. ",
     unsafe_allow_html=True
