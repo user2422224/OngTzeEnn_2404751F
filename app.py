@@ -85,9 +85,9 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.markdown("<div class='title-big'>Airbnb AI Price Predictior</div>", unsafe_allow_html=True)
+st.markdown("<div class='title-big'>Airbnb AI Price Prediction</div>", unsafe_allow_html=True)
 st.markdown(
-    "<div class='subtitle'>Predict an estimated nightly price using listing attributes. ",
+    "<div class='subtitle'>Predict an estimated nightly price using listing attributes.</div>",
     unsafe_allow_html=True
 )
 
@@ -294,10 +294,9 @@ with tab_pred:
                         "toiles": int(toiles_selected),
                         "raw_model_output": float(raw_model_output),
                         "target_transform": target_transform if target_transform else "none",
-                        "raw_price_before_cap": float(pred_price),
-                        "capped": "Yes" if clipped else "No",
                         "predicted_price": float(y_pred),
-                        "cap_max": float(clamp_max)
+                        "cap_max": float(clamp_max),
+                        "capped": "Yes" if clipped else "No",
                     })
 
                 if show_debug:
@@ -458,26 +457,13 @@ with tab_tail:
                 "- The cap is a **business safeguard** to prevent unrealistic outputs during deployment.\n"
             )
 
-            if st.session_state.history:
-                hist_df = pd.DataFrame(st.session_state.history)
-                if "raw_price_before_cap" in hist_df.columns:
-                    st.markdown("### Raw vs Capped Predictions")
-                    fig_cap = px.scatter(
-                        hist_df,
-                        x="timestamp",
-                        y=["raw_price_before_cap", "predicted_price"],
-                        title="Raw prediction vs final displayed (capped/rounded)"
-                    )
-                    fig_cap.update_layout(yaxis_title="Price", xaxis_title="Time")
-                    st.plotly_chart(fig_cap, use_container_width=True)
-
     st.markdown("</div>", unsafe_allow_html=True)
 
 
 with tab_history:
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     st.markdown("<div class='section-title'>Prediction History</div>", unsafe_allow_html=True)
-    st.markdown("<div class='section-subtitle'.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-subtitle'>This table records your demo predictions.</div>", unsafe_allow_html=True)
 
     if st.session_state.history:
         hist_df = pd.DataFrame(st.session_state.history)
