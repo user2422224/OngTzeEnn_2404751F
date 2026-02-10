@@ -7,23 +7,22 @@ from datetime import datetime
 import plotly.graph_objects as go
 
 
+# Page configuration must be the first Streamlit command to avoid runtime errors.
 st.set_page_config(
     page_title="Airbnb Price Prediction",
     page_icon="🏡",
     layout="wide"
 )
 
+# Dataset path used to compute min, max, and percentile statistics for the price range gauge.
 DATA_PATH = "airbnb.csv"
 
-# Optional model files (if present, app will include them in dropdown)
+# Model registry for this app. Add more entries here if you export additional model versions.
 MODEL_FILES = {
-    "Final Iterative (Log-Transformed)": "airbnb_pricing_model.pkl",  # your current deployment package
-    "Baseline (Linear Regression)": "airbnb_lr_baseline.pkl",
-    "Baseline (Gradient Boosting)": "airbnb_gb_baseline.pkl",
-    "Final (Log Model - Optional Separate File)": "airbnb_final_log.pkl",
+    "Final Iterative (Log-Transformed)": "airbnb_pricing_model.pkl",
 }
 
-
+# App styling to keep the UI clean and consistent across sections.
 st.markdown(
     """
     <style>
@@ -87,19 +86,21 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# App header for clarity and target-audience friendly wording.
 st.markdown("<div class='title-big'>Airbnb AI Price Prediction</div>", unsafe_allow_html=True)
 st.markdown(
     "<div class='subtitle'>Interactive nightly price estimation using trained machine learning models.</div>",
     unsafe_allow_html=True
 )
 
-
+# Supported country values for the country input field.
 countries = [
     "United Kingdom", "France", "Italy", "Greece", "Turkey",
     "Morocco", "Japan", "India", "Thailand", "Georgia"
 ]
 
 
+# Finds the most likely price column in the dataset based on common naming patterns.
 def find_price_column(df: pd.DataFrame) -> str:
     candidates = ["price", "Price", "nightly_price", "nightlyPrice", "price_usd", "Price_USD", "listing_price"]
     for c in candidates:
@@ -111,6 +112,8 @@ def find_price_column(df: pd.DataFrame) -> str:
     return ""
 
 
+# Loads and summarizes dataset price statistics used for the gauge visualization.
+# Cached to keep the app responsive when re-running.
 @st.cache_data
 def load_dataset_prices(path: str) -> dict:
     df = pd.read_csv(path)
@@ -132,11 +135,13 @@ def load_dataset_prices(path: str) -> dict:
     }
 
 
+# Loads models only once per session to reduce repeated disk reads.
 @st.cache_resource
 def load_any_model(file_path: str):
     return joblib.load(file_path)
 
 
+# Filters the registry to only models that exist in the current folder.
 def resolve_available_models() -> dict:
     available = {}
     for name, path in MODEL_FILES.items():
@@ -145,6 +150,8 @@ def resolve_available_models() -> dict:
     return available
 
 
+# Handles two saved formats:
+# A deployment package dict with metadata, or a plain scikit-learn model/pipeline object.
 def unpack_deployment_package(obj):
     """
     Supports:
@@ -157,10 +164,11 @@ def unpack_deployment_package(obj):
         target_transform = str(obj.get("target_transform", "")).strip().lower()
         return model_obj, engineered_features, target_transform
 
-    # plain model
     return obj, [], ""
 
 
+# Aligns user inputs to the exact feature columns expected by the trained model.
+# Missing columns are filled with default values to prevent prediction failures.
 def build_pipeline_input(base_df: pd.DataFrame, model_obj, engineered_features) -> pd.DataFrame:
     if isinstance(engineered_features, (list, tuple)) and len(engineered_features) > 0:
         expected_cols = list(engineered_features)
@@ -186,12 +194,14 @@ def build_pipeline_input(base_df: pd.DataFrame, model_obj, engineered_features) 
     return df
 
 
+# Converts prediction back to the original price scale if the model was trained on log1p(price).
 def inverse_target_if_needed(pred_value: float, target_transform: str) -> float:
     if target_transform == "log1p":
         return float(np.expm1(pred_value))
     return float(pred_value)
 
 
+# Applies deployment-friendly constraints so outputs remain stable and readable for users.
 def clamp_round_safe(value: float, min_v: float, max_v: float, nearest: int) -> float:
     v = float(value)
     if not np.isfinite(v):
@@ -207,16 +217,19 @@ def clamp_round_safe(value: float, min_v: float, max_v: float, nearest: int) -> 
     return float(v)
 
 
+# Stores prediction history for interactive demo evidence and export.
 if "history" not in st.session_state:
     st.session_state.history = []
 
 
+# Validates that at least one model file is available before rendering the app.
 available_models = resolve_available_models()
 if not available_models:
     st.error("No model files found. Put your .pkl model file(s) in the same folder as app.py.")
     st.stop()
 
 
+# Sidebar keeps non-critical controls and debug options without cluttering the main user flow.
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/6/69/Airbnb_Logo_B%C3%A9lo.svg", width=120)
     st.header("App Controls")
@@ -231,9 +244,8 @@ with st.sidebar:
     show_debug = st.checkbox("Show model input (debug)", value=False)
     show_raw = st.checkbox("Show raw prediction (debug)", value=True)
 
-    st.caption("Tip: Add more model .pkl files to enable multiple versions in the dropdown.")
 
-
+# Main navigation focuses on an interactive prediction workflow plus evidence capture.
 tabs = st.tabs(["Predict", "History", "Export"])
 tab_pred, tab_history, tab_export = tabs
 
@@ -246,7 +258,7 @@ with tab_pred:
         st.markdown("<div class='section-title'>Listing parameters</div>", unsafe_allow_html=True)
         st.markdown("<div class='section-subtitle'>Enter listing attributes, then predict.</div>", unsafe_allow_html=True)
 
-        # Listing parameters FIRST (above output settings and above button)
+        # Listing parameters are placed before output settings to match the user’s mental flow.
         c1, c2 = st.columns(2)
         with c1:
             country_selected = st.selectbox("Country", countries, index=0)
@@ -258,8 +270,10 @@ with tab_pred:
             beds_selected = st.slider("Beds", 0, 16, 1, 1)
             studios_selected = st.selectbox("Studios (0 = No, 1 = Yes)", [0, 1], index=0)
 
+        # Simple derived field to keep compatibility with the features used in the notebook.
         toiles_selected = 1 if bathrooms_selected >= 1 else 0
 
+        # Lightweight input validation gives immediate feedback while keeping the app responsive.
         issues = []
         if bedrooms_selected == 0 and studios_selected == 0:
             issues.append("Bedrooms and Studios are both 0. If it’s a studio listing, set Studios = 1.")
@@ -277,10 +291,10 @@ with tab_pred:
 
         st.divider()
 
-        # Output settings SECOND (above the button)
         st.markdown("<div class='section-title'>Output settings</div>", unsafe_allow_html=True)
         st.markdown("<div class='section-subtitle'>Business safeguards for deployment outputs.</div>", unsafe_allow_html=True)
 
+        # Output controls are placed above the action button so users can adjust them before running prediction.
         round_to_nearest = st.selectbox("Round to nearest ($)", [1, 5, 10, 50, 100], index=2)
         clamp_min = st.number_input("Minimum clamp ($)", min_value=0, value=0, step=10)
         clamp_max = st.number_input("Maximum clamp ($)", min_value=100, value=10000, step=100)
@@ -296,14 +310,15 @@ with tab_pred:
         st.markdown("<div class='section-subtitle'>Result is shown with dataset min–max context.</div>", unsafe_allow_html=True)
 
         if not predict_btn:
-            st.info("Fill in the listing parameters and click **Predict Price**.")
+            st.info("Fill in the listing parameters and click Predict Price.")
 
         if predict_btn:
-            # Load chosen model
+            # Model loading is triggered only when needed to keep the app responsive.
             model_path = available_models[selected_model_name]
             raw_loaded = load_any_model(model_path)
             model_obj, engineered_features, target_transform = unpack_deployment_package(raw_loaded)
 
+            # User inputs are converted into a single-row DataFrame for scikit-learn prediction.
             df_input = pd.DataFrame({
                 "country": [country_selected],
                 "guests": [int(guests_selected)],
@@ -314,12 +329,15 @@ with tab_pred:
                 "toiles": [int(toiles_selected)]
             })
 
+            # The model may require additional columns from training; these are filled safely.
             df_ready = build_pipeline_input(df_input, model_obj, engineered_features)
 
             try:
+                # Prediction is generated, then converted back if the training used log1p(price).
                 raw_pred = float(model_obj.predict(df_ready)[0])
                 pred_price = inverse_target_if_needed(raw_pred, target_transform)
 
+                # Output constraints are applied for deployment safety and consistent UX.
                 clipped = (np.isfinite(pred_price) and pred_price > float(clamp_max))
                 y_pred = clamp_round_safe(pred_price, clamp_min, clamp_max, round_to_nearest)
 
@@ -335,7 +353,7 @@ with tab_pred:
                 else:
                     st.success("Prediction completed")
 
-                    # Gauge (min–max vs prediction) - non-black color scheme
+                    # Gauge shows where the predicted price sits within the dataset range and highlights the long tail.
                     try:
                         stats = load_dataset_prices(DATA_PATH)
                         min_p = stats["min"]
@@ -358,13 +376,17 @@ with tab_pred:
                             title={"text": "Predicted Price within Dataset Range"},
                             gauge={
                                 "axis": {"range": [min_p, max_p], "tickformat": ",.0f", "tickcolor": "#6b7280"},
-                                "bar": {"color": "#FF385C"},  # Airbnb red
+                                "bar": {"color": "#FF385C"},
                                 "steps": [
                                     {"range": [min_p, p90], "color": "#fde2e7"},
                                     {"range": [p90, p99], "color": "#fbb6c2"},
                                     {"range": [p99, max_p], "color": "#ef4444"},
                                 ],
-                                "threshold": {"line": {"color": "#7f1d1d", "width": 4}, "thickness": 0.85, "value": pred_val}
+                                "threshold": {
+                                    "line": {"color": "#7f1d1d", "width": 4},
+                                    "thickness": 0.85,
+                                    "value": pred_val
+                                }
                             }
                         ))
                         fig_range.update_layout(
@@ -386,6 +408,7 @@ with tab_pred:
                     if clipped:
                         st.warning(f"Note: Raw prediction exceeded the maximum clamp, so output was capped at ${int(clamp_max):,}.")
 
+                    # Each prediction is stored so you can demonstrate interactions and export results during evaluation.
                     st.session_state.history.append({
                         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "model_version": selected_model_name,
@@ -403,6 +426,7 @@ with tab_pred:
                         "capped": "Yes" if clipped else "No",
                     })
 
+                # Debug view helps validate column alignment when deploying the notebook pipeline.
                 if show_debug:
                     with st.expander("Debug: final input sent into Pipeline"):
                         st.dataframe(df_ready, use_container_width=True)
