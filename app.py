@@ -1,19 +1,10 @@
+import os
 import joblib
 import streamlit as st
 import numpy as np
 import pandas as pd
 from datetime import datetime
-import plotly.express as px
-
-
-MODEL_PATH = "airbnb_pricing_model.pkl"
-DATA_PATH = "airbnb.csv"   # <-- change if your dataset file name is different
-
-
-deployment_package = joblib.load(MODEL_PATH)
-model = deployment_package["model"]
-engineered_features = deployment_package.get("features", [])
-target_transform = str(deployment_package.get("target_transform", "")).strip().lower()
+import plotly.graph_objects as go
 
 
 st.set_page_config(
@@ -21,6 +12,17 @@ st.set_page_config(
     page_icon="🏡",
     layout="wide"
 )
+
+DATA_PATH = "airbnb.csv"
+
+# Optional model files (if present, app will include them in dropdown)
+MODEL_FILES = {
+    "Final Iterative (Log-Transformed)": "airbnb_pricing_model.pkl",  # your current deployment package
+    "Baseline (Linear Regression)": "airbnb_lr_baseline.pkl",
+    "Baseline (Gradient Boosting)": "airbnb_gb_baseline.pkl",
+    "Final (Log Model - Optional Separate File)": "airbnb_final_log.pkl",
+}
+
 
 st.markdown(
     """
@@ -87,7 +89,7 @@ st.markdown(
 
 st.markdown("<div class='title-big'>Airbnb AI Price Prediction</div>", unsafe_allow_html=True)
 st.markdown(
-    "<div class='subtitle'>Predict an estimated nightly price using listing attributes.</div>",
+    "<div class='subtitle'>Interactive nightly price estimation using trained machine learning models.</div>",
     unsafe_allow_html=True
 )
 
@@ -97,29 +99,73 @@ countries = [
     "Morocco", "Japan", "India", "Thailand", "Georgia"
 ]
 
-country_coords = {
-    "United Kingdom": (55.3781, -3.4360),
-    "France": (46.2276, 2.2137),
-    "Italy": (41.8719, 12.5674),
-    "Greece": (39.0742, 21.8243),
-    "Turkey": (38.9637, 35.2433),
-    "Morocco": (31.7917, -7.0926),
-    "Japan": (36.2048, 138.2529),
-    "India": (20.5937, 78.9629),
-    "Thailand": (15.8700, 100.9925),
-    "Georgia": (42.3154, 43.3569),
-}
+
+def find_price_column(df: pd.DataFrame) -> str:
+    candidates = ["price", "Price", "nightly_price", "nightlyPrice", "price_usd", "Price_USD", "listing_price"]
+    for c in candidates:
+        if c in df.columns:
+            return c
+    for c in df.columns:
+        if "price" in str(c).lower():
+            return c
+    return ""
 
 
-if "history" not in st.session_state:
-    st.session_state.history = []
+@st.cache_data
+def load_dataset_prices(path: str) -> dict:
+    df = pd.read_csv(path)
+    price_col = find_price_column(df)
+    if not price_col:
+        raise ValueError("Could not detect a price column in dataset.")
+    prices = pd.to_numeric(df[price_col], errors="coerce").dropna()
+    prices = prices[prices >= 0]
+    if len(prices) == 0:
+        raise ValueError("No valid prices found in dataset.")
+    return {
+        "price_col": price_col,
+        "min": float(prices.min()),
+        "max": float(prices.max()),
+        "median": float(prices.median()),
+        "p90": float(prices.quantile(0.90)),
+        "p99": float(prices.quantile(0.99)),
+        "count": int(len(prices)),
+    }
 
 
-def build_pipeline_input(base_df: pd.DataFrame) -> pd.DataFrame:
+@st.cache_resource
+def load_any_model(file_path: str):
+    return joblib.load(file_path)
+
+
+def resolve_available_models() -> dict:
+    available = {}
+    for name, path in MODEL_FILES.items():
+        if os.path.exists(path):
+            available[name] = path
+    return available
+
+
+def unpack_deployment_package(obj):
+    """
+    Supports:
+    1) deployment_package dict with keys: model, features(optional), target_transform(optional)
+    2) plain sklearn model/pipeline object
+    """
+    if isinstance(obj, dict) and "model" in obj:
+        model_obj = obj["model"]
+        engineered_features = obj.get("features", [])
+        target_transform = str(obj.get("target_transform", "")).strip().lower()
+        return model_obj, engineered_features, target_transform
+
+    # plain model
+    return obj, [], ""
+
+
+def build_pipeline_input(base_df: pd.DataFrame, model_obj, engineered_features) -> pd.DataFrame:
     if isinstance(engineered_features, (list, tuple)) and len(engineered_features) > 0:
         expected_cols = list(engineered_features)
-    elif hasattr(model, "feature_names_in_"):
-        expected_cols = list(model.feature_names_in_)
+    elif hasattr(model_obj, "feature_names_in_"):
+        expected_cols = list(model_obj.feature_names_in_)
     else:
         return base_df
 
@@ -140,9 +186,14 @@ def build_pipeline_input(base_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def inverse_target_if_needed(pred_value: float, target_transform: str) -> float:
+    if target_transform == "log1p":
+        return float(np.expm1(pred_value))
+    return float(pred_value)
+
+
 def clamp_round_safe(value: float, min_v: float, max_v: float, nearest: int) -> float:
     v = float(value)
-
     if not np.isfinite(v):
         return float("nan")
 
@@ -156,67 +207,58 @@ def clamp_round_safe(value: float, min_v: float, max_v: float, nearest: int) -> 
     return float(v)
 
 
-def inverse_target_if_needed(pred_value: float) -> float:
-    if target_transform == "log1p":
-        return float(np.expm1(pred_value))
-    return float(pred_value)
+if "history" not in st.session_state:
+    st.session_state.history = []
 
 
-@st.cache_data
-def load_dataset(path: str) -> pd.DataFrame:
-    return pd.read_csv(path)
-
-
-def find_price_column(df: pd.DataFrame) -> str:
-    candidates = ["price", "Price", "nightly_price", "nightlyPrice", "price_usd", "Price_USD", "listing_price"]
-    for c in candidates:
-        if c in df.columns:
-            return c
-    for c in df.columns:
-        if "price" in str(c).lower():
-            return c
-    return ""
+available_models = resolve_available_models()
+if not available_models:
+    st.error("No model files found. Put your .pkl model file(s) in the same folder as app.py.")
+    st.stop()
 
 
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/6/69/Airbnb_Logo_B%C3%A9lo.svg", width=120)
-    st.header("Listing Parameters")
+    st.header("App Controls")
 
-    country_selected = st.selectbox("Market Location", countries, index=0)
-
-    st.divider()
-    guests_selected = st.slider("Guests", 1, 16, 2, 1)
-    bedrooms_selected = st.slider("Bedrooms", 0, 10, 1, 1)
-    bathrooms_selected = st.slider("Bathrooms", 0, 10, 1, 1)   # draggable + integer only
-    beds_selected = st.slider("Beds", 0, 16, 1, 1)
-    studios_selected = st.selectbox("Studios (0 = No, 1 = Yes)", [0, 1], index=0)
-
-    st.divider()
-    st.subheader("Output settings")
-    round_to_nearest = st.selectbox("Round to nearest ($)", [1, 5, 10, 50, 100], index=2)
-    clamp_min = st.number_input("Minimum clamp ($)", min_value=0, value=0, step=10)
-    clamp_max = st.number_input("Maximum clamp ($)", min_value=100, value=10000, step=100)
+    selected_model_name = st.selectbox(
+        "Model Version",
+        list(available_models.keys()),
+        index=0
+    )
 
     st.divider()
     show_debug = st.checkbox("Show model input (debug)", value=False)
     show_raw = st.checkbox("Show raw prediction (debug)", value=True)
 
+    st.caption("Tip: Add more model .pkl files to enable multiple versions in the dropdown.")
 
-toiles_selected = 1 if bathrooms_selected >= 1 else 0
 
-
-tab_pred, tab_compare, tab_tail, tab_history, tab_export = st.tabs(
-    ["Predict", "Model Comparison", "Long-Tail Analysis", "History", "Export"]
-)
+tabs = st.tabs(["Predict", "History", "Export"])
+tab_pred, tab_history, tab_export = tabs
 
 
 with tab_pred:
-    left, right = st.columns([1.1, 0.9], gap="large")
+    left, right = st.columns([1.15, 0.85], gap="large")
 
     with left:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.markdown("<div class='section-title'>Listing inputs</div>", unsafe_allow_html=True)
-        st.markdown("<div class='section-subtitle'>Fill in the listing details and predict price.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Listing parameters</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-subtitle'>Enter listing attributes, then predict.</div>", unsafe_allow_html=True)
+
+        # Listing parameters FIRST (above output settings and above button)
+        c1, c2 = st.columns(2)
+        with c1:
+            country_selected = st.selectbox("Country", countries, index=0)
+            guests_selected = st.slider("Guests", 1, 16, 2, 1)
+            bedrooms_selected = st.slider("Bedrooms", 0, 10, 1, 1)
+
+        with c2:
+            bathrooms_selected = st.slider("Bathrooms (integer)", 0, 10, 1, 1)
+            beds_selected = st.slider("Beds", 0, 16, 1, 1)
+            studios_selected = st.selectbox("Studios (0 = No, 1 = Yes)", [0, 1], index=0)
+
+        toiles_selected = 1 if bathrooms_selected >= 1 else 0
 
         issues = []
         if bedrooms_selected == 0 and studios_selected == 0:
@@ -224,7 +266,7 @@ with tab_pred:
         if beds_selected > guests_selected + 2:
             issues.append("Beds is unusually high relative to guests. Double-check your input.")
         if guests_selected > 6 and (bedrooms_selected < 2 and studios_selected == 1):
-            issues.append("Many guests with a studio is uncommon. Consider increasing bedrooms or reducing guests.")
+            issues.append("Many guests with a studio is uncommon. Consider more bedrooms or fewer guests.")
         if beds_selected < max(1, guests_selected // 2):
             issues.append("Beds looks low relative to guests. Consider increasing beds.")
 
@@ -233,19 +275,35 @@ with tab_pred:
             for msg in issues:
                 st.write(f"- {msg}")
 
+        st.divider()
+
+        # Output settings SECOND (above the button)
+        st.markdown("<div class='section-title'>Output settings</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-subtitle'>Business safeguards for deployment outputs.</div>", unsafe_allow_html=True)
+
+        round_to_nearest = st.selectbox("Round to nearest ($)", [1, 5, 10, 50, 100], index=2)
+        clamp_min = st.number_input("Minimum clamp ($)", min_value=0, value=0, step=10)
+        clamp_max = st.number_input("Maximum clamp ($)", min_value=100, value=10000, step=100)
+
         st.write("")
         predict_btn = st.button("Predict Price", type="primary")
+
         st.markdown("</div>", unsafe_allow_html=True)
 
     with right:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("<div class='section-title'>Prediction</div>", unsafe_allow_html=True)
-        st.markdown("<div class='section-subtitle'>The model returns an estimated nightly price.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-subtitle'>Result is shown with dataset min–max context.</div>", unsafe_allow_html=True)
 
         if not predict_btn:
-            st.info("Adjust inputs in the sidebar and click **Predict Price**.")
+            st.info("Fill in the listing parameters and click **Predict Price**.")
 
         if predict_btn:
+            # Load chosen model
+            model_path = available_models[selected_model_name]
+            raw_loaded = load_any_model(model_path)
+            model_obj, engineered_features, target_transform = unpack_deployment_package(raw_loaded)
+
             df_input = pd.DataFrame({
                 "country": [country_selected],
                 "guests": [int(guests_selected)],
@@ -256,35 +314,81 @@ with tab_pred:
                 "toiles": [int(toiles_selected)]
             })
 
-            df_ready = build_pipeline_input(df_input)
+            df_ready = build_pipeline_input(df_input, model_obj, engineered_features)
 
             try:
-                raw_model_output = float(model.predict(df_ready)[0])
-                pred_price = inverse_target_if_needed(raw_model_output)
+                raw_pred = float(model_obj.predict(df_ready)[0])
+                pred_price = inverse_target_if_needed(raw_pred, target_transform)
 
                 clipped = (np.isfinite(pred_price) and pred_price > float(clamp_max))
                 y_pred = clamp_round_safe(pred_price, clamp_min, clamp_max, round_to_nearest)
 
                 if show_raw:
                     if target_transform == "log1p":
-                        st.caption(f"Debug: raw model output (log1p scale) = {raw_model_output:,.6f}")
+                        st.caption(f"Debug: raw model output (log1p scale) = {raw_pred:,.6f}")
                         st.caption(f"Debug: converted back to price (before clamp/round) = {pred_price:,.2f}")
                     else:
-                        st.caption(f"Debug: raw model output (before clamp/round) = {raw_model_output:,.2f}")
+                        st.caption(f"Debug: raw model output (before clamp/round) = {raw_pred:,.2f}")
 
                 if not np.isfinite(y_pred):
-                    st.error("Prediction returned an invalid value (NaN/Infinity). Try different inputs or check model training.")
+                    st.error("Prediction returned an invalid value (NaN/Infinity). Try different inputs.")
                 else:
                     st.success("Prediction completed")
-                    st.metric("Predicted price (per night)", f"${y_pred:,.2f}")
+
+                    # Gauge (min–max vs prediction) - non-black color scheme
+                    try:
+                        stats = load_dataset_prices(DATA_PATH)
+                        min_p = stats["min"]
+                        max_p = stats["max"]
+                        med_p = stats["median"]
+                        p90 = stats["p90"]
+                        p99 = stats["p99"]
+
+                        pred_val = float(y_pred)
+                        if np.isfinite(pred_val):
+                            pred_val = max(min_p, min(pred_val, max_p))
+                        else:
+                            pred_val = med_p
+
+                        fig_range = go.Figure()
+                        fig_range.add_trace(go.Indicator(
+                            mode="gauge+number",
+                            value=pred_val,
+                            number={"prefix": "$", "valueformat": ",.0f", "font": {"size": 34}},
+                            title={"text": "Predicted Price within Dataset Range"},
+                            gauge={
+                                "axis": {"range": [min_p, max_p], "tickformat": ",.0f", "tickcolor": "#6b7280"},
+                                "bar": {"color": "#FF385C"},  # Airbnb red
+                                "steps": [
+                                    {"range": [min_p, p90], "color": "#fde2e7"},
+                                    {"range": [p90, p99], "color": "#fbb6c2"},
+                                    {"range": [p99, max_p], "color": "#ef4444"},
+                                ],
+                                "threshold": {"line": {"color": "#7f1d1d", "width": 4}, "thickness": 0.85, "value": pred_val}
+                            }
+                        ))
+                        fig_range.update_layout(
+                            height=260,
+                            margin=dict(t=40, b=10, l=10, r=10),
+                            paper_bgcolor="rgba(0,0,0,0)",
+                            font={"color": "#111827"}
+                        )
+                        st.plotly_chart(fig_range, use_container_width=True)
+
+                        st.caption(
+                            f"Dataset: min ${min_p:,.0f} | median ${med_p:,.0f} | 90th ${p90:,.0f} | "
+                            f"99th ${p99:,.0f} | max ${max_p:,.0f}"
+                        )
+                    except Exception as e:
+                        st.metric("Predicted price (per night)", f"${y_pred:,.2f}")
+                        st.caption(f"Dataset range graph unavailable (dataset issue): {e}")
 
                     if clipped:
-                        st.warning(
-                            f"Note: Raw prediction exceeded the maximum clamp, so output was capped at ${int(clamp_max):,}."
-                        )
+                        st.warning(f"Note: Raw prediction exceeded the maximum clamp, so output was capped at ${int(clamp_max):,}.")
 
                     st.session_state.history.append({
                         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "model_version": selected_model_name,
                         "country": country_selected,
                         "guests": int(guests_selected),
                         "bedrooms": int(bedrooms_selected),
@@ -292,8 +396,8 @@ with tab_pred:
                         "beds": int(beds_selected),
                         "studios": int(studios_selected),
                         "toiles": int(toiles_selected),
-                        "raw_model_output": float(raw_model_output),
                         "target_transform": target_transform if target_transform else "none",
+                        "raw_model_output": float(raw_pred),
                         "predicted_price": float(y_pred),
                         "cap_max": float(clamp_max),
                         "capped": "Yes" if clipped else "No",
@@ -305,165 +409,18 @@ with tab_pred:
 
             except Exception as e:
                 st.error(
-                    "Prediction failed. The model expects certain columns from training.\n"
-                    "Please confirm your .pkl is the deployment package saved from the notebook."
+                    "Prediction failed. This usually means your model expects different columns.\n"
+                    "Fix: ensure your saved model is a Pipeline or the deployment package with correct features."
                 )
                 st.code(str(e))
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    st.write("")
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.markdown("<div class='section-title'>Map visualisation</div>", unsafe_allow_html=True)
-    st.markdown(
-        "<div class='section-subtitle'>Approximate country locations for visualisation. "
-        "Shows selected country plus up to 20 recent predictions.</div>",
-        unsafe_allow_html=True
-    )
-
-    map_rows = []
-    lat, lon = country_coords[country_selected]
-    map_rows.append({"lat": lat, "lon": lon, "label": f"Selected: {country_selected}"})
-
-    if st.session_state.history:
-        for h in st.session_state.history[-20:]:
-            c = h["country"]
-            lat_h, lon_h = country_coords.get(c, (np.nan, np.nan))
-            if np.isfinite(lat_h) and np.isfinite(lon_h):
-                map_rows.append({"lat": lat_h, "lon": lon_h, "label": f"{c} | ${h['predicted_price']:.0f}"})
-
-    map_df = pd.DataFrame(map_rows)
-    st.map(map_df[["lat", "lon"]], zoom=1)
-
-    with st.expander("See map pin details"):
-        st.dataframe(map_df, use_container_width=True)
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-with tab_compare:
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.markdown("<div class='section-title'>Final Startup Performance Report</div>", unsafe_allow_html=True)
-    st.markdown("<div class='section-subtitle'>Compare model iterations using MAE (Lower is Better).</div>", unsafe_allow_html=True)
-
-    perf_df = pd.DataFrame([
-        {"Model Version": "Baseline (Linear Regression)", "MAE ($)": 8840.91, "Business Readiness": "Unreliable"},
-        {"Model Version": "Baseline (Gradient Boosting)", "MAE ($)": 7508.38, "Business Readiness": "MVP Stage"},
-        {"Model Version": "Final Iterative (Log-Transformed)", "MAE ($)": 6814.08, "Business Readiness": "Market Ready"},
-    ])
-
-    st.dataframe(perf_df, use_container_width=True)
-
-    fig_mae = px.bar(
-        perf_df,
-        x="Model Version",
-        y="MAE ($)",
-        text="MAE ($)",
-        title="MAE Comparison Across Model Versions"
-    )
-    fig_mae.update_traces(texttemplate="$%{text:,.2f}", textposition="outside")
-    fig_mae.update_layout(yaxis_tickprefix="$", xaxis_title="", yaxis_title="MAE ($)")
-    st.plotly_chart(fig_mae, use_container_width=True)
-
-    error_reduction = 8840.91 - 6814.08
-    gain_pct = (error_reduction / 8840.91) * 100
-
-    st.success(f"Total Error Reduction (Baseline LR → Final): ${error_reduction:,.2f}  |  Overall Gain: {gain_pct:.2f}%")
-
-    st.markdown(
-        "- **Why Iteration 3 improved:** log-transform reduces the impact of extreme luxury listings (long-tail) on training.\n"
-        "- **Business readiness:** final model reduces error enough to support more reliable pricing guidance."
-    )
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-with tab_tail:
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.markdown("<div class='section-title'>Long-Tail / Imbalance Analysis (Dataset Evidence)</div>", unsafe_allow_html=True)
-    st.markdown(
-        "<div class='section-subtitle'>Shows why prices are capped high: a small number of luxury listings create extreme values.</div>",
-        unsafe_allow_html=True
-    )
-
-    df_data = None
-    load_error = None
-
-    try:
-        df_data = load_dataset(DATA_PATH)
-    except Exception as e:
-        load_error = str(e)
-
-    if df_data is None:
-        st.error(
-            f"Could not load dataset at `{DATA_PATH}`.\n\n"
-            "Fix: Put the CSV in the same folder as app.py OR update DATA_PATH.\n"
-        )
-        st.code(load_error)
-        st.markdown("</div>", unsafe_allow_html=True)
-    else:
-        price_col = find_price_column(df_data)
-
-        if price_col == "":
-            st.error("Could not find a price column in your dataset. Rename your target column to `price` or include 'price' in the column name.")
-            st.write("Columns found:", list(df_data.columns))
-            st.markdown("</div>", unsafe_allow_html=True)
-        else:
-            prices = pd.to_numeric(df_data[price_col], errors="coerce").dropna()
-            prices = prices[prices >= 0]
-
-            st.write(f"Detected price column: **{price_col}**")
-            st.write(f"Rows with valid price: **{len(prices):,}**")
-
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Median", f"${prices.median():,.0f}")
-            c2.metric("90th percentile", f"${prices.quantile(0.90):,.0f}")
-            c3.metric("99th percentile", f"${prices.quantile(0.99):,.0f}")
-            c4.metric("Max", f"${prices.max():,.0f}")
-
-            pct_above_cap = (prices > float(clamp_max)).mean() * 100
-            st.info(f"With your current cap (${int(clamp_max):,}), **{pct_above_cap:.2f}%** of listings exceed the cap in the dataset.")
-
-            show_log = st.checkbox("Use log scale for x-axis to show long-tail", value=False)
-            bins = st.slider("Histogram bins", 10, 120, 50, 5)
-
-            plot_df = pd.DataFrame({"price": prices})
-
-            if show_log:
-                plot_df = plot_df[plot_df["price"] > 0]
-                plot_df["log_price"] = np.log10(plot_df["price"])
-                fig_hist = px.histogram(
-                    plot_df,
-                    x="log_price",
-                    nbins=bins,
-                    title="Price Distribution (log10 scale) — Long Tail Visible"
-                )
-                fig_hist.update_layout(xaxis_title="log10(price)", yaxis_title="Count")
-            else:
-                fig_hist = px.histogram(
-                    plot_df,
-                    x="price",
-                    nbins=bins,
-                    title="Price Distribution (raw scale) — Skewed / Long Tail"
-                )
-                fig_hist.update_layout(xaxis_title="Price", yaxis_title="Count")
-
-            st.plotly_chart(fig_hist, use_container_width=True)
-
-            st.markdown("### Why Price is still capped high?")
-            st.write(
-                "- Airbnb pricing data is **imbalanced / long-tailed**: most listings are low-mid, but a small number are ultra-expensive.\n"
-                "- Even after **log1p(price)**, rare combinations can still produce high predicted values.\n"
-                "- The cap is a **business safeguard** to prevent unrealistic outputs during deployment.\n"
-            )
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
 
 with tab_history:
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     st.markdown("<div class='section-title'>Prediction History</div>", unsafe_allow_html=True)
-    st.markdown("<div class='section-subtitle'>This table records your demo predictions.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-subtitle'>Your past predictions for demo evidence.</div>", unsafe_allow_html=True)
 
     if st.session_state.history:
         hist_df = pd.DataFrame(st.session_state.history)
@@ -477,7 +434,7 @@ with tab_history:
 with tab_export:
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     st.markdown("<div class='section-title'>Export</div>", unsafe_allow_html=True)
-    st.markdown("<div class='section-subtitle'>Download your prediction history for evidence.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-subtitle'>Download prediction history (CSV).</div>", unsafe_allow_html=True)
 
     if st.session_state.history:
         hist_df = pd.DataFrame(st.session_state.history)
