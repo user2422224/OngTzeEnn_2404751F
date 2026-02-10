@@ -213,31 +213,47 @@ def apply_input_validation(
     studios: int
 ) -> dict:
     """
-    Prevents unrealistic or out-of-distribution combinations that the dataset/model likely never saw.
-    Returns the adjusted values plus user-facing notes about what was auto-corrected.
+    Applies business-aware validation to prevent invalid or misleading predictions.
+    The goal is to preserve user intent while avoiding inputs the model was never trained on.
     """
 
     notes = []
 
+    # Hard constraint: Airbnb listings must have at least 1 guest
     if guests < 1:
         guests = 1
-        notes.append("Guests cannot be below 1, so it was set to 1.")
+        notes.append("Guests cannot be below 1. Set to minimum value of 1.")
 
-    if beds < 1:
+    # Hard constraint: Guests require at least one bed
+    if guests >= 1 and beds < 1:
         beds = 1
-        notes.append("Beds cannot be 0 in real listings, so it was set to 1.")
+        notes.append("Listings with guests must have at least 1 bed. Beds set to 1.")
 
+    # Soft constraint: Bathrooms rarely zero in real listings
     if bathrooms < 1:
         bathrooms = 1
-        notes.append("Bathrooms cannot be 0 in real listings, so it was set to 1.")
+        notes.append(
+            "Bathrooms set to 1. Listings with 0 bathrooms are extremely rare and not well represented in training data."
+        )
 
+    # Studio logic
     if bedrooms == 0 and studios == 0:
         studios = 1
-        notes.append("Bedrooms is 0, so Studios was auto-set to 1 (studio listing).")
+        notes.append(
+            "Bedrooms is 0. Treated as a studio listing by setting Studios = 1."
+        )
 
     if bedrooms > 0 and studios == 1:
         studios = 0
-        notes.append("Studios was set to 0 because Bedrooms is greater than 0.")
+        notes.append(
+            "Studios set to 0 because Bedrooms > 0 (not a studio listing)."
+        )
+
+    # Capacity realism check (warning only)
+    if guests > beds * 2:
+        notes.append(
+            "Guest count is high relative to beds. Prediction may be less reliable."
+        )
 
     return {
         "guests": int(guests),
@@ -247,7 +263,6 @@ def apply_input_validation(
         "studios": int(studios),
         "notes": notes
     }
-
 
 if "history" not in st.session_state:
     st.session_state.history = []
