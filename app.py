@@ -369,23 +369,80 @@ with tab_pred:
                 raw_pred = float(model_obj.predict(df_ready)[0])
                 pred_price = inverse_target_if_needed(raw_pred, target_transform)
 
-                clipped = (np.isfinite(pred_price) and pred_price > float(clamp_max))
-                y_pred = clamp_round_safe(pred_price, clamp_min, clamp_max, round_to_nearest)
-
                 if show_raw:
                     if target_transform == "log1p":
                         st.caption(f"Debug: raw model output (log1p scale) = {raw_pred:,.6f}")
-                        st.caption(f"Debug: converted back to price (before clamp/round) = {pred_price:,.2f}")
+                        st.caption(f"Debug: converted back to price (before guardrails/clamp/round) = {pred_price:,.2f}")
                     else:
-                        st.caption(f"Debug: raw model output (before clamp/round) = {raw_pred:,.2f}")
+                        st.caption(f"Debug: raw model output (before guardrails/clamp/round) = {raw_pred:,.2f}")
+
+                if not np.isfinite(pred_price):
+                    st.error("Prediction returned an invalid value (NaN/Infinity). Try different inputs.")
+                    st.stop()
+
+                stats = None
+                try:
+                    stats = load_dataset_prices(DATA_PATH)
+                except Exception:
+                    stats = None
+
+                guardrail_notes = []
+
+                final_price = float(pred_price)
+
+                bedrooms_v = int(validated["bedrooms"])
+                guests_v = int(validated["guests"])
+                beds_v = int(validated["beds"])
+                studios_v = int(validated["studios"])
+                bathrooms_v = int(validated["bathrooms"])
+
+                if guests_v >= 1 and beds_v == 0:
+                    st.error("Invalid input: Guests cannot be >= 1 when Beds = 0. Please increase Beds.")
+                    st.stop()
+
+                if bedrooms_v == 0 and studios_v == 0:
+                    st.error("Invalid input: If Bedrooms = 0, set Studios = 1 for a studio listing.")
+                    st.stop()
+
+                if bathrooms_v == 0:
+                    guardrail_notes.append("Bathrooms is 0. Many real listings have at least 1 bathroom. This may reduce accuracy.")
+
+                budget_profile = (guests_v <= 2 and bedrooms_v == 0 and studios_v == 1)
+                small_profile = (guests_v <= 2 and bedrooms_v <= 1)
+
+                if budget_profile:
+                    if stats is not None:
+                        segment_cap = max(120.0, min(250.0, stats["p90"]))
+                        final_price = min(final_price, segment_cap)
+                        guardrail_notes.append(f"Budget listing cap applied (<=2 guests, studio). Capped at ${segment_cap:,.0f}.")
+                    else:
+                        final_price = min(final_price, 200.0)
+                        guardrail_notes.append("Budget listing cap applied (<=2 guests, studio). Capped at $200.")
+                elif small_profile:
+                    if stats is not None:
+                        segment_cap = max(180.0, min(450.0, stats["p90"]))
+                        final_price = min(final_price, segment_cap)
+                        guardrail_notes.append(f"Small listing cap applied (<=2 guests, <=1 bedroom). Capped at ${segment_cap:,.0f}.")
+                    else:
+                        final_price = min(final_price, 300.0)
+                        guardrail_notes.append("Small listing cap applied (<=2 guests, <=1 bedroom). Capped at $300.")
+
+                clipped = (np.isfinite(final_price) and final_price > float(clamp_max))
+                y_pred = clamp_round_safe(final_price, clamp_min, clamp_max, round_to_nearest)
 
                 if not np.isfinite(y_pred):
-                    st.error("Prediction returned an invalid value (NaN/Infinity). Try different inputs.")
-                else:
-                    st.success("Prediction completed")
+                    st.error("Final output after guardrails/clamp is invalid. Try different inputs.")
+                    st.stop()
 
-                    try:
-                        stats = load_dataset_prices(DATA_PATH)
+                st.success("Prediction completed")
+
+                if guardrail_notes:
+                    st.info("Business guardrails applied:")
+                    for n in guardrail_notes:
+                        st.write(f"- {n}")
+
+                try:
+                    if stats is not None:
                         min_p = stats["min"]
                         max_p = stats["max"]
                         med_p = stats["median"]
@@ -431,29 +488,33 @@ with tab_pred:
                             f"Dataset: min ${min_p:,.0f} | median ${med_p:,.0f} | 90th ${p90:,.0f} | "
                             f"99th ${p99:,.0f} | max ${max_p:,.0f}"
                         )
-                    except Exception as e:
+                    else:
                         st.metric("Predicted price (per night)", f"${y_pred:,.2f}")
-                        st.caption(f"Dataset range graph unavailable (dataset issue): {e}")
+                except Exception as e:
+                    st.metric("Predicted price (per night)", f"${y_pred:,.2f}")
+                    st.caption(f"Dataset range graph unavailable (dataset issue): {e}")
 
-                    if clipped:
-                        st.warning(f"Note: Raw prediction exceeded the maximum clamp, so output was capped at ${int(clamp_max):,}.")
+                if clipped:
+                    st.warning(f"Note: Output exceeded the maximum clamp, so it was capped at ${int(clamp_max):,}.")
 
-                    st.session_state.history.append({
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "model_version": selected_model_name,
-                        "country": country_selected,
-                        "guests": validated["guests"],
-                        "bedrooms": validated["bedrooms"],
-                        "bathrooms": validated["bathrooms"],
-                        "beds": validated["beds"],
-                        "studios": validated["studios"],
-                        "toiles": int(toiles_selected),
-                        "target_transform": target_transform if target_transform else "none",
-                        "raw_model_output": float(raw_pred),
-                        "predicted_price": float(y_pred),
-                        "cap_max": float(clamp_max),
-                        "capped": "Yes" if clipped else "No",
-                    })
+                st.session_state.history.append({
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "model_version": selected_model_name,
+                    "country": country_selected,
+                    "guests": validated["guests"],
+                    "bedrooms": validated["bedrooms"],
+                    "bathrooms": validated["bathrooms"],
+                    "beds": validated["beds"],
+                    "studios": validated["studios"],
+                    "toiles": int(toiles_selected),
+                    "target_transform": target_transform if target_transform else "none",
+                    "raw_model_output": float(raw_pred),
+                    "raw_price_before_guardrails": float(pred_price),
+                    "final_price_before_round_clamp": float(final_price),
+                    "predicted_price": float(y_pred),
+                    "cap_max": float(clamp_max),
+                    "capped": "Yes" if clipped else "No",
+                })
 
                 if show_debug:
                     with st.expander("Debug: final input sent into Pipeline"):
@@ -462,12 +523,9 @@ with tab_pred:
             except Exception as e:
                 st.error(
                     "Prediction failed. This usually means your model expects different columns.\n"
-                    "Fix: ensure your saved model is a Pipeline or the deployment package with correct features."
+                    "Fix: ensure your saved model is a Pipeline or a deployment package with correct features."
                 )
                 st.code(str(e))
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
 
 with tab_history:
     st.markdown("<div class='card'>", unsafe_allow_html=True)
